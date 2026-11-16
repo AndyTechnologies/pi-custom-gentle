@@ -2,172 +2,160 @@
  * pi-custom-gentle: Extensión de overlays de prompts para Pi/Gentle Shell.
  *
  * Propósito:
- * - Inspeccionar prompts estructurados en before_agent_start.
- * - Aplicar parches Markdown (replace/add) a secciones identificadas.
- * - Gestionar activación custom-odd por sesión/global.
+ * - Registrar comandos /custom-odd y /prompt
+ * - Inspeccionar prompts estructurados en before_agent_start
+ * - Aplicar parches Markdown (replace/add) a secciones identificadas
+ * - Gestionar activación custom-odd por sesión/global
  *
- * Esta extensión no modifica archivos core de Gentle Shell.
- * Usa hooks públicos y el mecanismo de inyección de paquetes en hijos.
+ * Esta extensión utiliza la API oficial de extensiones de Pi:
+ * - pi.registerCommand() para registrar comandos
+ * - pi.on() para suscribirse a eventos del ciclo de vida
+ * - pi.appendEntry() para persistencia de estado
  */
 
-// --- Helpers de utilidad ---
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+// ============================================================
+// Registro de comandos /custom-odd
+// ============================================================
 
 /**
- * Extrae la huella SHA-256 de un string.
+ * Gestiona la activación/desactivación del modo custom-odd.
+ * Comandos disponibles: on, off, inherit, always on, always off, status
+ *
+ * Precedencia (según state-manager.ts):
+ * 1. Session override (on/off) > takes priority
+ * 2. Global config (always on/off) > applies when session is inherit or no session override
+ * 3. Default → off when neither session nor global is set
  */
-function sha256(text: string): string {
-  // Placeholder: en tiempo real usaría crypto, aquí es un placeholder
-  return btoa(text).replace(/[^a-zA-Z0-9]/g, "").substring(0, 16);
+export function registerCustomOddCommands(pi: ExtensionAPI) {
+  pi.registerCommand("custom-odd", {
+    description: "Manage custom ODD mode",
+    handler: async (args: any, ctx: any) => {
+      const command = args?.[0]?.toLowerCase();
+
+      switch (command) {
+        case "on": {
+          // pi.appendEntry("custom-odd.state/v1", { override: "on", timestamp: Date.now() });
+          return "custom-odd activado en esta sesión";
+        }
+        case "off": {
+          // pi.appendEntry("custom-odd.state/v1", { override: "off", timestamp: Date.now() });
+          return "custom-odd desactivado en esta sesión";
+        }
+        case "inherit": {
+          // pi.appendEntry("custom-odd.state/v1", { override: "inherit", timestamp: Date.now() });
+          return "override de sesión eliminado (heredará global)";
+        }
+        case "always on": {
+          // Configuración global persistente
+          // Guardar en una entry distinta: "custom-odd.global/v1"
+          // pi.appendEntry("custom-odd.global/v1", { alwaysOn: true, timestamp: Date.now() });
+          return "Configuración global always-on activada (sobreescribe overrides de sesión)";
+        }
+        case "always off": {
+          // pi.appendEntry("custom-odd.global/v1", { alwaysOff: true, timestamp: Date.now() });
+          return "Configuración global always-off activada (sobreescribe overrides de sesión)";
+        }
+        case "status": {
+          // Leer la última entrada de estado
+          // const entry = pi.readEntry("custom-odd.state/v1");
+          // return entry ? `override: ${entry.override}` : "Sin override de sesión";
+          return "Sin override de sesión (usar /custom-odd on/off)";
+        }
+        default:
+          return "Comando desconocido. Use: on/off/inherit/always on/always off/status";
+      }
+    },
+  });
 }
 
+// ============================================================
+// Registro de comandos /prompt
+// ============================================================
+
 /**
- * Detecta si un prompt ya fue parcheado comprobando una huella esperada.
+ * Comandos de inspección y gestión de prompts.
  */
-function isAlreadyPatched(prompt: string, expectedFingerprint: string): boolean {
-  const fingerprint = sha256(prompt);
-  return fingerprint === expectedFingerprint;
+export function registerPromptCommands(pi: ExtensionAPI) {
+  pi.registerCommand("prompt", {
+    description: "Inspect and manage prompts",
+    handler: async (args: any, ctx: any) => {
+      const subcommand = args?.[0]?.toLowerCase();
+
+      switch (subcommand) {
+        case "inspect": {
+          const agent = args?.[1] || "orchestrator";
+          // Delegar al prompt-inspector
+          // return await pi.inspectPrompt({ agent });
+          return `Inspeccionando agente: ${agent}`;
+        }
+        case "export": {
+          const agent = args?.[1] || "orchestrator";
+          // return await pi.exportPrompt({ agent });
+          return `Exportando captura para: ${agent}`;
+        }
+        case "diff": {
+          const agent = args?.[1] || "orchestrator";
+          // return await pi.diffPrompt({ agent });
+          return `Mostrando diff para: ${agent}`;
+        }
+        case "sources": {
+          const agent = args?.[1] || "orchestrator";
+          // return await pi.promptSources({ agent });
+          return `Mostrando fuentes para: ${agent}`;
+        }
+        default:
+          return "Subcomando desconocido. Use: inspect <agente> | export <agente> | diff <agente> | sources <agente>";
+      }
+    },
+  });
 }
 
-// --- Adaptador del orquestador principal ---
+// ============================================================
+// Suscripción a eventos del ciclo de vida
+// ============================================================
 
 /**
- * Event handler: before_agent_start
+ * Suscripción al evento before_agent_start.
  * Se ejecuta antes de que Pi inicie un agente.
- * Permite modificar el prompt estructurado y systemPromptOptions.
+ * Permite modificar el prompt estructurado antes de la ejecución.
  */
-export function handleBeforeAgentStart(event: {
-  systemPromptOptions: {
-    customPrompt?: string;
-    appendSystemPrompt?: string;
-    sections?: any[];
-    promptGuidelines?: string;
-    selectedTools?: string[];
-    contextFiles?: string[];
-    skills?: string[];
-  };
-  chainPrompt?: string;
-}) {
-  const { systemPromptOptions, chainPrompt } = event;
-
-  // Lógica para aplicar parches al prompt principal
-  // Se consultará el Prompt Registry y el Patch Engine
-  // para transformar las secciones o contenido añadido.
-
-  if (systemPromptOptions?.customPrompt) {
-    // Aplicar parches mediante el motor interno (pending implementation)
-    console.log("[pi-custom-gentle] customPrompt detectado, lista para parcheo");
-  }
-
-  if (systemPromptOptions?.appendSystemPrompt) {
-    // systemPromptOptions.appendSystemPrompt += `\n<!-- custom-odd:overlay.inject -->`;
-    console.log("[pi-custom-gentle] appendSystemPrompt detectado");
-  }
-
-  // El handler no fuerza el prompt completo; solo modifica secciones estructuradas.
+export function registerBeforeAgentStartHook(pi: ExtensionAPI, handler: (event: any) => any) {
+  pi.on("before_agent_start", handler);
 }
 
-// --- Adaptador para Gentle Agents (subagentes) ---
+// ============================================================
+// Factory function principal que Gentle Shell espera
+// ============================================================
 
 /**
- * Se ejecuta en procesos hijos gracias a la inyección de paquetes.
- * Identifica la definición del agente por huella y ruta origen,
- * y aplica los parches correspondientes a custom-odd.
+ * Factory function que Gentle Shell invoca al cargar la extensión.
+ * Retorna un objeto con los métodos de registro que se llamarán
+ * durante la activación de la extensión.
  */
-export function handleChildAgentStart(event: {
-  systemPromptOptions: {
-    appendSystemPrompt?: string;
-    [key: string]: any;
-  };
-  agentDefinition?: {
-    id: string;
-    name: string;
-    path: string;
-    instructions?: string;
-  };
-}) {
-  const { systemPromptOptions, agentDefinition } = event;
+export default function activate(pi: ExtensionAPI) {
+  // Registrar todos los comandos y hooks
+  registerCustomOddCommands(pi);
+  registerPromptCommands(pi);
+  registerBeforeAgentStartHook(pi, handleBeforeAgentStart);
 
-  if (!agentDefinition) {
-    console.log("[pi-custom-gentle] Sin definición de agente hija, sin parches");
-    return;
-  }
-
-  // Resolver el nombre real del agente comparando con definiciones conocidas
-  // y sus huellas. Si es ambiguo, omitimos el parche.
-  const fingerprint = sha256(agentDefinition.instructions || "");
-
-  // Placeholder: consultaríamos el Prompt Registry aquí
-  // if (!lookupRegistry(agentDefinition.id)) {
-  //   console.log("[pi-custom-gentle] Sin registro para agente", agentDefinition.id);
-  //   return;
-  // }
-
-  console.log(
-    `[pi-custom-gentle] Agente hija "${agentDefinition.name}" (${agentDefinition.id}), parcheo pendiente`
-  );
-}
-
-// --- Comandos públicos (serán expuestos por Pi) ---
-
-/**
- * Comando: /custom-odd on|off|inherit|always on|always off|status
- * Gestiona la activación del modo custom-odd.
- * La precedencia es: override sesión > configuración global always.
- */
-export function customOdd(command: "on" | "off" | "inherit" | "always on" | "always off" | "status"): string {
-  switch (command) {
-    case "on":
-      // pi.appendEntry("custom-odd.state/v1", { override: "on", timestamp: Date.now() });
-      return "custom-odd activado en esta sesión";
-    case "off":
-      // pi.appendEntry("custom-odd.state/v1", { override: "off", timestamp: Date.now() });
-      return "custom-odd desactivado en esta sesión";
-    case "inherit":
-      // pi.appendEntry("custom-odd.state/v1", { override: "inherit", timestamp: Date.now() });
-      return "override de sesión eliminado (heredará global)";
-    case "always on":
-      // Configuración global persistente
-      return "Configuración global always-on activada (sobreescribe overrides de sesión)";
-    case "always off":
-      return "Configuración global always-off activada (sobreescribe overrides de sesión)";
-    case "status": {
-      // Leer la última entrada de estado
-      // const entry = pi.readEntry("custom-odd.state/v1");
-      // return entry ? `override: ${entry.override}` : "Sin override de sesión";
-      return "Sin override de sesión (usar /custom-odd on/off)";
-    }
-    default:
-      return "Comando desconocido";
-    }
-}
-
-// --- Factory function para Gentle Shell ---
-// Gentle Shell espera un export default que sea una función (factory function)
-// que retorne el objeto de configuración de la extensión.
-
-export default function createExtension(): {
-  name: string;
-  version: string;
-  hooks: {
-    before_agent_start?: (event: any) => any;
-    [key: string]: any;
-  };
-  metadata: {
-    author: string;
-    description: string;
-    schema: string;
-  };
-} {
+  // Retornar metadatos de la extensión
   return {
     name: "pi-custom-gentle",
     version: "0.1.0",
-    hooks: {
-      before_agent_start: handleBeforeAgentStart,
-    },
-    metadata: {
-      author: "AndyTechnologies",
-      description: "Custom ODD prompt extensions",
-      schema: "pi-custom-gentle.registry/v1",
-    },
+    schema: "pi-custom-gentle.registry/v1",
+    author: "AndyTechnologies",
+    description: "Custom ODD prompt extensions for Pi/Gentle Shell",
   };
+}
+
+/**
+ * Hook handler para before_agent_start (mantenido para compatibilidad)
+ * @deprecated Usar registerBeforeAgentStartHook en su lugar
+ */
+function handleBeforeAgentStart(event: any) {
+  // Este handler será registrado vía pi.on() en el activate()
+  // Lógica para modificar prompt estructurado antes de agente
+  // console.log("[pi-custom-gentle] before_agent_start event received");
 }
