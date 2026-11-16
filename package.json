@@ -3,10 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "Custom ODD prompt extensions for Pi/Gentle Shell",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "echo 'Tests placeholder - use your test framework'",
+    "lint": "echo 'Lint placeholder'",
+    "prepare": "echo 'Preparation step'"
+  },
+  "license": "MIT",
   "pi": {
     "extensions": [
       "./extensions/pi-custom-gentle.ts"
     ]
-  },
-  "description": "Custom ODD prompt extensions for Pi/Gentle Shell"
+  }
 }
