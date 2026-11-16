@@ -4,21 +4,19 @@
  * Propósito:
  * - Inspeccionar prompts estructurados en before_agent_start.
  * - Aplicar parches Markdown (replace/add) a secciones identificadas.
- - Gestionar activación custom-odd por sesión/global.
+ * - Gestionar activación custom-odd por sesión/global.
  *
  * Esta extensión no modifica archivos core de Gentle Shell.
  * Usa hooks públicos y el mecanismo de inyección de paquetes en hijos.
  */
 
-import { before_agent_start, before_provider_request } from "@pi-dev/core/types";
-
- // --- Helpers de utilidad ---
+// --- Helpers de utilidad ---
 
 /**
  * Extrae la huella SHA-256 de un string.
  */
 function sha256(text: string): string {
-  // En tiempo real usaría crypto, aquí es un placeholder
+  // Placeholder: en tiempo real usaría crypto, aquí es un placeholder
   return btoa(text).replace(/[^a-zA-Z0-9]/g, "").substring(0, 16);
 }
 
@@ -49,21 +47,17 @@ export function handleBeforeAgentStart(event: {
   };
   chainPrompt?: string;
 }) {
+  const { systemPromptOptions, chainPrompt } = event;
+
   // Lógica para aplicar parches al prompt principal
   // Se consultará el Prompt Registry y el Patch Engine
   // para transformar las secciones o contenido añadido.
 
-  const { systemPromptOptions, chainPrompt } = event;
-
-  // Ejemplo: si hay customPrompt, podríamos inyectar overlays
   if (systemPromptOptions?.customPrompt) {
-    // Aplicar parches mediante el motor interno
-    // const patched = applyPatches(systemPromptOptions.customPrompt);
-    // systemPromptOptions.customPrompt = patched;
+    // Aplicar parches mediante el motor interno (pending implementation)
     console.log("[pi-custom-gentle] customPrompt detectado, lista para parcheo");
   }
 
-  // Ejemplo: inyectar en appendSystemPrompt si existe
   if (systemPromptOptions?.appendSystemPrompt) {
     // systemPromptOptions.appendSystemPrompt += `\n<!-- custom-odd:overlay.inject -->`;
     console.log("[pi-custom-gentle] appendSystemPrompt detectado");
@@ -103,15 +97,8 @@ export function handleChildAgentStart(event: {
   const fingerprint = sha256(agentDefinition.instructions || "");
 
   // Placeholder: consultaríamos el Prompt Registry aquí
-  // const registryEntry = lookupRegistry(agentDefinition.id);
-  // if (!registryEntry) {
+  // if (!lookupRegistry(agentDefinition.id)) {
   //   console.log("[pi-custom-gentle] Sin registro para agente", agentDefinition.id);
-  //   return;
-  // }
-
-  // Aplicar parches solo si la huella coincide y el agente está habilitado
-  // if (isAlreadyPatched(systemPromptOptions.appendSystemPrompt || "", fingerprint)) {
-  //   console.log("[pi-custom-gentle] Ya parcheado o huella coincidente");
   //   return;
   // }
 
@@ -151,23 +138,36 @@ export function customOdd(command: "on" | "off" | "inherit" | "always on" | "alw
     }
     default:
       return "Comando desconocido";
-  }
+    }
 }
 
-// --- Exports para que Pi reconozca la extensión ---
+// --- Factory function para Gentle Shell ---
+// Gentle Shell espera un export default que sea una función (factory function)
+// que retorne el objeto de configuración de la extensión.
 
-export default {
-  name: "pi-custom-gentle",
-  version: "0.1.0",
-  // Puntos de gancho públicos que Gentle Shell discoverará
+export default function createExtension(): {
+  name: string;
+  version: string;
   hooks: {
-    before_agent_start: handleBeforeAgentStart,
-    // before_provider_request: handleProviderPayload, // Futuro
-  },
-  // Metadatos para el registry/inspector
+    before_agent_start?: (event: any) => any;
+    [key: string]: any;
+  };
   metadata: {
-    author: "AndyTechnologies",
-    description: "Custom ODD prompt extensions",
-    schema: "pi-custom-gentle.registry/v1",
-  },
-};
+    author: string;
+    description: string;
+    schema: string;
+  };
+} {
+  return {
+    name: "pi-custom-gentle",
+    version: "0.1.0",
+    hooks: {
+      before_agent_start: handleBeforeAgentStart,
+    },
+    metadata: {
+      author: "AndyTechnologies",
+      description: "Custom ODD prompt extensions",
+      schema: "pi-custom-gentle.registry/v1",
+    },
+  };
+}
