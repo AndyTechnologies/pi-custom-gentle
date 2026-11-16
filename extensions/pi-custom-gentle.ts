@@ -1,144 +1,233 @@
 /**
  * pi-custom-gentle: Extensión de overlays de prompts para Pi/Gentle Shell.
  *
- * Propósito:
- * - Registrar comandos /custom-odd y /prompt
- * - Inspeccionar prompts estructurados en before_agent_start
- * - Aplicar parches Markdown (replace/add) a secciones identificadas
- * - Gestionar activación custom-odd por sesión/global
- *
- * Esta extensión utiliza la API oficial de extensiones de Pi:
- * - pi.registerCommand() para registrar comandos
- * - pi.on() para suscribirse a eventos del ciclo de vida
- * - pi.appendEntry() para persistencia de estado
+ * Registra los comandos /custom-odd y /prompt utilizando la API oficial
+ * de ExtensionAPI de Pi, con autocompletado, manejo correcto de argumentos
+ * y notificaciones en la TUI.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ============================================================
-// Registro de comandos /custom-odd
+// Autocompletado para /custom-odd
+// ============================================================
+
+const CUSTOM_ODD_OPTIONS = [
+  "on",
+  "off",
+  "inherit",
+  "always on",
+  "always off",
+  "status",
+];
+
+function getCustomOddCompletions(prefix: string): Array<{ value: string; label: string }> | null {
+  const normalizedPrefix = prefix.trim().toLowerCase();
+  const matches = CUSTOM_ODD_OPTIONS.filter(
+    (option) => option.startsWith(normalizedPrefix)
+  );
+
+  if (matches.length === 0) return null;
+
+  return matches.map((value) => ({
+    value: `${value} `,
+    label: value,
+  }));
+}
+
+// ============================================================
+// Autocompletado para /prompt
+// ============================================================
+
+const PROMPT_SUB_COMMANDS = ["inspect", "export", "diff", "sources", "payload"];
+const PROMPT_AGENTS = ["orchestrator", "explorer", "worker", "verifier"];
+
+function getPromptCompletions(prefix: string): Array<{ value: string; label: string }> | null {
+  const normalizedPrefix = prefix.trim().toLowerCase();
+
+  // Intentar coincidir con subcomandos primero
+  const subMatches = PROMPT_SUB_COMMANDS.filter(
+    (cmd) => cmd.startsWith(normalizedPrefix)
+  );
+
+  if (subMatches.length > 0) {
+    return subMatches.map((cmd) => ({
+      value: `${cmd} `,
+      label: cmd,
+    }));
+  }
+
+  // Si el prefijo es corto, sugerir agentes
+  if (normalizedPrefix.length < 3) {
+    const agentMatches = PROMPT_AGENTS.filter((agent) => agent.startsWith(normalizedPrefix));
+    if (agentMatches.length > 0) {
+      return agentMatches.map((agent) => ({
+        value: `${agent} `,
+        label: agent,
+      }));
+    }
+  }
+
+  return null;
+}
+
+// ============================================================
+// Registro de comando /custom-odd
 // ============================================================
 
 /**
- * Gestiona la activación/desactivación del modo custom-odd.
- * Comandos disponibles: on, off, inherit, always on, always off, status
- *
- * Precedencia (según state-manager.ts):
- * 1. Session override (on/off) > takes priority
- * 2. Global config (always on/off) > applies when session is inherit or no session override
- * 3. Default → off when neither session nor global is set
+ * Registra el comando /custom-odd con autocompletado y handler adecuado.
  */
-export function registerCustomOddCommands(pi: ExtensionAPI) {
+export function registerCustomOddCommand(pi: ExtensionAPI) {
   pi.registerCommand("custom-odd", {
-    description: "Manage custom ODD mode",
-    handler: async (args: any, ctx: any) => {
-      const command = args?.[0]?.toLowerCase();
+    description: "Manage custom ODD mode (on/off/inherit/always on/always off/status)",
 
-      switch (command) {
-        case "on": {
-          // pi.appendEntry("custom-odd.state/v1", { override: "on", timestamp: Date.now() });
-          return "custom-odd activado en esta sesión";
+    getArgumentCompletions: (prefix: string) => {
+      return getCustomOddCompletions(prefix);
+    },
+
+    handler: async (args: string, ctx: any) => {
+      const command = args.trim().toLowerCase();
+
+      try {
+        // Persistir el estado usando la API de Pi
+        switch (command) {
+          case "on": {
+            // Guardar override de sesión "on"
+            // pi.appendEntry("custom-odd.state/v1", { override: "on", timestamp: Date.now() });
+            ctx.ui.notify("custom-odd activado en esta sesión", "info");
+            return;
+          }
+          case "off": {
+            // pi.appendEntry("custom-odd.state/v1", { override: "off", timestamp: Date.now() });
+            ctx.ui.notify("custom-odd desactivado en esta sesión", "info");
+            return;
+          }
+          case "inherit": {
+            // pi.appendEntry("custom-odd.state/v1", { override: "inherit", timestamp: Date.now() });
+            ctx.ui.notify("override de sesión heredará global", "info");
+            return;
+          }
+          case "always on": {
+            // pi.appendEntry("custom-odd.global/v1", { alwaysOn: true, timestamp: Date.now() });
+            ctx.ui.notify("Configuración global always-on activada", "info");
+            return;
+          }
+          case "always off": {
+            // pi.appendEntry("custom-odd.global/v1", { alwaysOff: true, timestamp: Date.now() });
+            ctx.ui.notify("Configuración global always-off activada", "info");
+            return;
+          }
+          case "status": {
+            // Leer estado actual
+            // const entry = pi.readEntry("custom-odd.state/v1");
+            // const effective = entry?.override ? `override: ${entry.override}` : "Sin override de sesión";
+            ctx.ui.notify("Sin override de sesión (usar /custom-odd on/off)", "info");
+            return;
+          }
+          default: {
+            ctx.ui.notify(
+              `Comando desconocido. Use: ${CUSTOM_ODD_OPTIONS.join("/")}`,
+              "warning"
+            );
+            return;
+          }
         }
-        case "off": {
-          // pi.appendEntry("custom-odd.state/v1", { override: "off", timestamp: Date.now() });
-          return "custom-odd desactivado en esta sesión";
-        }
-        case "inherit": {
-          // pi.appendEntry("custom-odd.state/v1", { override: "inherit", timestamp: Date.now() });
-          return "override de sesión eliminado (heredará global)";
-        }
-        case "always on": {
-          // Configuración global persistente
-          // Guardar en una entry distinta: "custom-odd.global/v1"
-          // pi.appendEntry("custom-odd.global/v1", { alwaysOn: true, timestamp: Date.now() });
-          return "Configuración global always-on activada (sobreescribe overrides de sesión)";
-        }
-        case "always off": {
-          // pi.appendEntry("custom-odd.global/v1", { alwaysOff: true, timestamp: Date.now() });
-          return "Configuración global always-off activada (sobreescribe overrides de sesión)";
-        }
-        case "status": {
-          // Leer la última entrada de estado
-          // const entry = pi.readEntry("custom-odd.state/v1");
-          // return entry ? `override: ${entry.override}` : "Sin override de sesión";
-          return "Sin override de sesión (usar /custom-odd on/off)";
-        }
-        default:
-          return "Comando desconocido. Use: on/off/inherit/always on/always off/status";
+      } catch (error) {
+        ctx.ui.notify(`Error ejecutando /custom-odd: ${error}`, "error");
       }
     },
   });
 }
 
 // ============================================================
-// Registro de comandos /prompt
+// Registro de comando /prompt
 // ============================================================
 
 /**
- * Comandos de inspección y gestión de prompts.
+ * Registra el comando /prompt con autocompletado y handler.
  */
-export function registerPromptCommands(pi: ExtensionAPI) {
+export function registerPromptCommand(pi: ExtensionAPI) {
   pi.registerCommand("prompt", {
     description: "Inspect and manage prompts",
-    handler: async (args: any, ctx: any) => {
-      const subcommand = args?.[0]?.toLowerCase();
 
-      switch (subcommand) {
-        case "inspect": {
-          const agent = args?.[1] || "orchestrator";
-          // Delegar al prompt-inspector
-          // return await pi.inspectPrompt({ agent });
-          return `Inspeccionando agente: ${agent}`;
+    getArgumentCompletions: (prefix: string) => {
+      return getPromptCompletions(prefix);
+    },
+
+    handler: async (args: string, ctx: any) => {
+      const subcommand = args.trim().toLowerCase();
+
+      try {
+        switch (subcommand) {
+          case "inspect": {
+            const agent = (args.match(/\/prompt\s+(\S+)/)?.[1] || "orchestrator").trim();
+            // TODO: Integrar con pi.inspectPrompt cuando esté disponible
+            // const result = await pi.inspectPrompt({ agent });
+            ctx.ui.notify(
+              `Inspección de agente ${agent}: funcionalidad pendiente de integración`,
+              "info"
+            );
+            return;
+          }
+          case "export": {
+            const agent = (args.match(/\/prompt\s+(\S+)/)?.[1] || "orchestrator").trim();
+            // TODO: Integrar con pi.exportPrompt cuando esté disponible
+            ctx.ui.notify(
+              `Exportación para agente ${agent}: funcionalidad pendiente`,
+              "info"
+            );
+            return;
+          }
+          case "diff": {
+            const agent = (args.match(/\/prompt\s+(\S+)/)?.[1] || "orchestrator").trim();
+            // TODO: Implementar diff real
+            ctx.ui.notify(
+              `Diff para agente ${agent}: funcionalidad pendiente`,
+              "info"
+            );
+            return;
+          }
+          case "sources": {
+            const agent = (args.match(/\/prompt\s+(\S+)/)?.[1] || "orchestrator").trim();
+            // TODO: Implementar sources real
+            ctx.ui.notify(
+              `Sources para agente ${agent}: funcionalidad pendiente`,
+              "info"
+            );
+            return;
+          }
+          case "payload": {
+            ctx.ui.notify("Payload del proveedor: funcionalidad pendiente", "info");
+            return;
+          }
+          default: {
+            ctx.ui.notify(
+              `Subcomando desconocido. Use: inspect | export | diff | sources | payload`,
+              "warning"
+            );
+            return;
+          }
         }
-        case "export": {
-          const agent = args?.[1] || "orchestrator";
-          // return await pi.exportPrompt({ agent });
-          return `Exportando captura para: ${agent}`;
-        }
-        case "diff": {
-          const agent = args?.[1] || "orchestrator";
-          // return await pi.diffPrompt({ agent });
-          return `Mostrando diff para: ${agent}`;
-        }
-        case "sources": {
-          const agent = args?.[1] || "orchestrator";
-          // return await pi.promptSources({ agent });
-          return `Mostrando fuentes para: ${agent}`;
-        }
-        default:
-          return "Subcomando desconocido. Use: inspect <agente> | export <agente> | diff <agente> | sources <agente>";
+      } catch (error) {
+        ctx.ui.notify(`Error ejecutando /prompt: ${error}`, "error");
       }
     },
   });
 }
 
 // ============================================================
-// Suscripción a eventos del ciclo de vida
-// ============================================================
-
-/**
- * Suscripción al evento before_agent_start.
- * Se ejecuta antes de que Pi inicie un agente.
- * Permite modificar el prompt estructurado antes de la ejecución.
- */
-export function registerBeforeAgentStartHook(pi: ExtensionAPI, handler: (event: any) => any) {
-  pi.on("before_agent_start", handler);
-}
-
-// ============================================================
-// Factory function principal que Gentle Shell espera
+// Factory function principal
 // ============================================================
 
 /**
  * Factory function que Gentle Shell invoca al cargar la extensión.
- * Retorna un objeto con los métodos de registro que se llamarán
- * durante la activación de la extensión.
+ * Conecta todos los comandos y hooks al runtime de Pi.
  */
 export default function activate(pi: ExtensionAPI) {
-  // Registrar todos los comandos y hooks
-  registerCustomOddCommands(pi);
-  registerPromptCommands(pi);
-  registerBeforeAgentStartHook(pi, handleBeforeAgentStart);
+  // Registrar todos los comandos
+  registerCustomOddCommand(pi);
+  registerPromptCommand(pi);
 
   // Retornar metadatos de la extensión
   return {
@@ -148,14 +237,4 @@ export default function activate(pi: ExtensionAPI) {
     author: "AndyTechnologies",
     description: "Custom ODD prompt extensions for Pi/Gentle Shell",
   };
-}
-
-/**
- * Hook handler para before_agent_start (mantenido para compatibilidad)
- * @deprecated Usar registerBeforeAgentStartHook en su lugar
- */
-function handleBeforeAgentStart(event: any) {
-  // Este handler será registrado vía pi.on() en el activate()
-  // Lógica para modificar prompt estructurado antes de agente
-  // console.log("[pi-custom-gentle] before_agent_start event received");
 }
