@@ -1,9 +1,0 @@
-{
-  "name": "my-gentle-extension",
-  "version": "0.1.0",
-  "description": "A minimal gentle-shell extension",
-  "author": "andy",
-  "engines": {
-    "gentle-shell": "*"
-  }
-}

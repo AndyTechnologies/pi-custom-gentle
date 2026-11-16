@@ -1,0 +1,12 @@
+{
+  "name": "pi-custom-gentle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/pi-custom-gentle.ts"
+    ]
+  },
+  "description": "Custom ODD prompt extensions for Pi/Gentle Shell"
+}
