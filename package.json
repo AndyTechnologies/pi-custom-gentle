@@ -14,6 +14,14 @@
   "pi": {
     "extensions": [
       "./extensions/pi-custom-gentle.ts"
+    ],
+    "skills": [
+      "skills/custom-odd-product-quest/SKILL.md",
+      "skills/custom-odd-architecture-quest/SKILL.md",
+      "skills/quests-interview/SKILL.md"
     ]
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
   }
 }
