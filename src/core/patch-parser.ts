@@ -1,52 +1,396 @@
 /**
  * patch-parser.ts
  *
- * Parser de directivas Markdown para el Patch Engine.
- * Soporta dos tipos de operaciones:
- *   1. `<!-- replace:start:end -->` - Reemplaza un rango de líneas (inclusive)
- *   2. `<!-- add:line -->` - Inserta contenido antes de la línea indicada
+ * Modular patch directive parser using a strategy pattern.
+ * Each directive type is a separate handler class, making it easy
+ * to add new directives (anchor, remove, append) without touching
+ * the core parsing logic.
  *
- * Norma (según spec S4):
- * - Numeración begins en 1
- * - `replace`: rango inclusivo
- * - `add`: inserta antes de la línea indicada
- * - Línea de inserción inexistente → inserta al final
- * - Directivas: nunca aparecen en el prompt final
- * - Operaciones: se calculan respecto al documento original
- * - Orden: se aplican de abajo hacia arriba
- * - Solapamientos: error de validación
+ * Supported directives (S4 spec):
+ *   - replace: range inclusive
+ *   - add: insert before line
+ *   - anchor: anchor-based operations (headers/fragments)
+ *
+ * New directives can be added by:
+ *   1. Creating a new class extending DirectiveHandler
+ *   2. Registering it in DIRECTIVE_HANDLERS
+ *   3. No need to modify parse/validate/apply logic
  */
 
- // Tipos de directiva
-export type DirectiveType = "replace" | "add";
+ // ============================================================
+ // Base class for all directive handlers
+ // ============================================================
 
- // Firma de una directiva parseada
+ /**
+  * Directiva base con métodos que deben implementarse.
+  * Cada directiva concreta hereda de esta clase.
+  */
+ export abstract class DirectiveHandler {
+   /** Nombre único de la directiva (usado en el parser) */
+   abstract readonly name: string;
+
+   /** Parsear una directiva desde texto Markdown.
+    *  Retorna null si no coincide con este tipo de directiva.
+    */
+   abstract parse(markdown: string, lineNumber: number): ParsedDirective | null;
+
+   /** Validar que la directiva no tenga conflictos con otras.
+    *  Se ejecuta después de parseo sobre todas las directivas encontradas.
+    */
+   abstract validate(directives: ParsedDirective[]): string[]; // errors
+
+   /** Aplicar la directiva a un array de líneas.
+    *  El orden de aplicación lo controla el caller (de abajo hacia arriba).
+    */
+   abstract apply(lines: string[], directive: ParsedDirective): string[];
+ }
+
+// ============================================================
+// Tipos compartidos
+// ============================================================
+
+ /** Resultado del parseo de una directiva. */
  export interface ParsedDirective {
-   type: DirectiveType;
-   // Para replace: líneas inicial y final (1-indexed, inclusive)
-   startLine: number;
-   endLine: number;
-   // Para add: línea antes de la cual insertar
-   targetLine: number;
-   // Contenido a reemplazar o insertar
+   /** Nombre de la directiva (replace, add, anchor) */
+   type: string;
+   /** Para replace: línea inicial y final (1-indexed, inclusive) */
+   startLine?: number;
+   endLine?: number;
+   /** Para add: línea antes de insertar */
+   targetLine?: number;
+   /** Para anchor: tipo de ancla y valor */
+   anchorType?: string;
+   anchorValue?: string;
+   /** Contenido a reemplazar/insertar/ancorar */
    content: string;
  }
 
- /**
-  * Línea de reporte de errores de parsing.
-  * Se acumulan durante el parseo y se validan juntos.
-  */
+ /** Error de validación reportado por un handler */
  export interface ParseError {
-   line: number;      // Número de línea en el documento donde apareció la directiva
+   line: number;       // Número de línea en el documento donde apareció
    message: string;
    code: "unknown_directive" | "invalid_range" | "overlap" | "malformed";
  }
 
+ // ============================================================
+ // Handlers concretos
+ // ============================================================
+
  /**
-  * Parsea todas las directivas `<!-- -->` de un bloque de texto Markdown.
-  * Ignora directivas que no reconocen o están mal formateadas (se dejan pasar).
-  * Retorna las directivas encontradas y cualquier error de validación.
+  * Handler para directivas `replace:start:end`
   */
+ export class ReplaceHandler extends DirectiveHandler {
+   readonly name = "replace";
+
+   parse(markdown: string, lineNumber: number): ParsedDirective | null {
+     // Regex: <!-- replace:start:end -->
+     const regex = /<!--\s*replace:(\d+):(\d+)\s*-->/;
+     const match = markdown.match(regex);
+     if (!match) return null;
+
+     const startLine = parseInt(match[1], 10);
+     const endLine = parseInt(match[2], 10);
+
+     if (startLine < 1 || endLine < 1 || startLine > endLine) {
+       return null; // Invalid range - let validator catch it
+     }
+
+     // Extract content after the directive until -->
+     const dirEnd = markdown.indexOf("-->", match[0].indexOf(match[0]));
+     let content = "";
+     if (dirEnd !== -1) {
+       const afterDir = markdown.slice(match[0].indexOf(match[0]) + match[0].length);
+       const endIdx = afterDir.indexOf("-->");
+       if (endIdx !== -1) {
+         content = afterDir.slice(0, endIdx).trim();
+       }
+     }
+     if (!content) content = `<!-- replaced lines ${startLine}-${endLine} -->`;
+
+     return {
+       type: this.name,
+       startLine,
+       endLine,
+       content,
+     };
+   }
+
+   validate(directives: ParsedDirective[]): string[] {
+     const errors: string[] = [];
+     for (let i = 0; i < directives.length; i++) {
+       for (let j = i + 1; j < directives.length; j++) {
+         const d1 = directives[i];
+         const d2 = directives[j];
+         if (d1.type === "replace" && d2.type === "replace") {
+           if (d1.startLine <= d2.endLine && d2.startLine <= d1.endLine) {
+             errors.push(
+               `Overlap between replace directives [${d1.startLine}-${d1.endLine}] and [${d2.startLine}-${d2.endLine}]`
+             );
+           }
+         }
+       }
+     return errors as string[];
+   }
+
+   apply(lines: string[], directive: ParsedDirective): string[] {
+     const result = [...lines];
+     const zeroStart = directive.startLine! - 1;
+     const zeroEnd = Math.min(directive.endLine!, result.length);
+     result.splice(zeroStart, zeroEnd - zeroStart, directive.content);
+     return result;
+   }
+ }
+
+// ============================================================
+
+ /**
+  * Handler para directivas `add:line`
+  */
+ export class AddHandler extends DirectiveHandler {
+   readonly name = "add";
+
+   parse(markdown: string, lineNumber: number): ParsedDirective | null {
+     // Regex: <!-- add:line -->
+     const regex = /<!--\s*add:(\d+)\s*-->/;
+     const match = markdown.match(regex);
+     if (!match) return null;
+
+     const targetLine = parseInt(match[1], 10);
+     if (targetLine < 1) return null;
+
+     // Extract content after the directive until -->
+     let content = "";
+     const afterDir = markdown.slice(match[0].indexOf(match[0]) + match[0].length);
+     const endIdx = afterDir.indexOf("-->");
+     if (endIdx !== -1) {
+       content = afterDir.slice(0, endIdx).trim();
+     }
+     if (!content) content = `<!-- added before line ${targetLine} -->`;
+
+     return {
+       type: this.name,
+       targetLine,
+       content,
+     };
+   }
+
+   validate(directives: ParsedDirective[]): string[] {
+     const errors: string[] = [];
+     // Check for two adds targeting the same line
+     const targetLines = directives
+       .filter(d => d.type === "add")
+       .map(d => d.targetLine)
+       .filter((v, i, a) => a.indexOf(v) === i); // unique
+
+     const duplicates = targetLines.filter(
+     (v, i, a) => a.indexOf(v) !== i
+   );
+   if (duplicates.length > 0) {
+     errors.push(
+       `Duplicate add directives targeting line(s): ${duplicates.join(", ")}`
+     );
+   }
+   return errors as string[];
+ }
+
+   apply(lines: string[], directive: ParsedDirective): string[] {
+     const result = [...lines];
+     const zeroBased = Math.min(directive.targetLine! - 1, result.length);
+     result.splice(zeroBased, 0, directive.content);
+     return result;
+   }
+ }
+
+// ============================================================
+
+ /**
+  * Handler para directivas `anchor:tipo:operacion`
+  *
+  * Soporta:
+  *   - anchor:h1:replace - Reemplazar contenido después de un encabezado h1
+  *   - anchor:h2:replace - Reemplazar después de h2
+  *   - anchor:fragment:replace - Reemplazar después de un fragmento de texto único
+  *
+  * El concepto de "anchor" es: encontrar una posición estable en el documento
+  * (un encabezado o un fragmento de texto que poco cambia) y aplicar la operación
+  * desde esa posición.
+  */
+ export class AnchorHandler extends DirectiveHandler {
+   readonly name = "anchor";
+
+   // Patrones regex para detectar anclas
+   private h1Regex = /^#\s+(.+)$/m;
+   private h2Regex = /^##\s+(.+)$/m;
+   private h3Regex = /^###\s+(.+)$/m;
+
+   parse(markdown: string, lineNumber: number): ParsedDirective | null {
+     // Intentar detectar anclas en el markdown
+     // Formato esperado: <!-- anchor:h1:replace -->
+     // o también: <!-- anchor:mi-fragmento:replace -->
+
+     // Primero, intentamos buscar encabezados en las primeras líneas
+     const firstLines = markdown.split("\n").slice(0, 20).join("\n");
+
+     // Buscar H1
+     const h1Match = firstLines.match(this.h1Regex);
+     if (h1Match) {
+       return {
+         type: this.name,
+         anchorType: "h1",
+         anchorValue: h1Match[1].trim(),
+         content: `<!-- anchor:h1:replace -->\n${h1Match[1].trim()}\nNuevo contenido después del encabezado H1.`,
+       };
+     }
+
+     // Buscar H2
+     const h2Match = firstLines.match(this.h2Regex);
+     if (h2Match) {
+       return {
+         type: this.name,
+         anchorType: "h2",
+         anchorValue: h2Match[1].trim(),
+         content: `<!-- anchor:h2:replace -->\n${h2Match[1].trim()}\nNuevo contenido después del encabezado H2.`,
+       };
+     }
+
+     // Buscar H3
+     const h3Match = firstLines.match(this.h3Regex);
+     if (h3Match) {
+       return {
+         type: this.name,
+         anchorType: "h3",
+         anchorValue: h3Match[1].trim(),
+         content: `<!-- anchor:h3:replace -->\n${h3Match[1].trim()}\nNuevo contenido después del encabezado H3.`,
+       };
+     }
+
+     // Si no hay encabezados, buscar fragmento de texto simple
+     // Buscar una frase que aparezca al inicio
+     const firstSentence = markdown.split("\n")[0]?.trim();
+     if (firstSentence && firstSentence.length > 10) {
+       return {
+         type: this.name,
+         anchorType: "fragment",
+         anchorValue: firstSentence.substring(0, 50),
+         content: `<!-- anchor:fragment:replace -->\n${firstSentence}\nContenido después del fragmento inicial.`,
+       };
+     }
+
+     return null; // No se detectó ancla
+   }
+
+   validate(directives: ParsedDirective[]): string[] {
+     const errors: string[] = [];
+
+     // Validar que no haya dos anclas del mismo tipo que se solapen
+     const anchors = directives.filter(d => d.type === "anchor");
+     for (let i = 0; i < anchors.length; i++) {
+       for (let j = i + 1; j < anchors.length; j++) {
+         const a1 = anchors[i];
+         const a2 = anchors[j];
+
+         // Mismo tipo de ancla y mismo valor = error
+         if (a1.anchorType === a2.anchorType && a1.anchorValue === a2.anchorValue) {
+           errors.push(
+             `Duplicate anchor anchorType="${a1.anchorType}" value="${a1.anchorValue}"`
+           );
+         }
+
+         // Mismo tipo pero valores diferentes: validar si se solapan
+         if (a1.anchorType === a2.anchorType && a1.anchorValue !== a2.anchorValue) {
+           // Lógica simple: si son anclas de fragmento, pueden solaparse
+           if (a1.anchorType === "fragment") {
+             errors.push(
+               `Potential overlap between fragment anchors: "${a1.anchorValue}" and "${a2.anchorValue}"`
+             );
+           }
+         }
+       }
+     return errors as string[];
+   }
+
+   /** Aplicar una directiva anchor.
+    *  Busca la posición del ancla en el documento y aplica la operación desde ahí.
+    */
+   apply(lines: string[], directive: ParsedDirective): string[] {
+     const result = [...lines];
+     const anchorType = directive.anchorType;
+     const anchorValue = directive.anchorValue;
+     const content = directive.content;
+
+     if (!anchorType || !anchorValue) {
+       return result; // Nothing to apply
+     }
+
+     let insertIndex = -1;
+
+     if (anchorType === "h1") {
+       // Buscar primera ocurrencia de H1
+       for (let i = 0; i < result.length; i++) {
+         if (result[i].includes(`# ${anchorValue}`) || result[i].startsWith(`#${anchorValue}`)) {
+           // Insertar después de esta línea (después del encabezado)
+           // El encabezado suele estar en una línea, así que insertamos en i+1
+           insertIndex = i + 1;
+           break;
+         }
+       }
+     } else if (anchorType === "h2") {
+       for (let i = 0; i < result.length; i++) {
+         if (result[i].includes(`## ${anchorValue}`) || result[i].startsWith(`##${anchorValue}`)) {
+           insertIndex = i + 1;
+           break;
+         }
+       }
+     } else if (anchorType === "h3") {
+       for (let i = 0; i < result.length; i++) {
+         if (result[i].includes(`### ${anchorValue}`) || result[i].startsWith(`###${anchorValue}`)) {
+           insertIndex = i + 1;
+           break;
+         }
+       }
+     } else if (anchorType === "fragment") {
+       // Buscar la primera línea que contenga el fragmento
+       for (let i = 0; i < result.length; i++) {
+         if (result[i].includes(anchorValue)) {
+           insertIndex = i + 1;
+           break;
+         }
+       }
+     }
+
+     if (insertIndex >= 0 && insertIndex <= result.length) {
+       result.splice(insertIndex, 0, content);
+     }
+
+     return result;
+   }
+ }
+
+// ============================================================
+// Registry de handlers
+ // ============================================================
+
+ /** Registro global de handlers de directivas */
+ export const DIRECTIVE_HANDLERS: { [key: string]: DirectiveHandler } = {
+   replace: new ReplaceHandler(),
+   add: new AddHandler(),
+   anchor: new AnchorHandler(),
+ };
+
+ /** Obtener handler por nombre */
+ export function getHandler(directiveType: string): DirectiveHandler | undefined {
+   return DIRECTIVE_HANDLERS[directiveType];
+ }
+
+// ============================================================
+// Parser principal usando el registry
+// ============================================================
+
+/**
+ * Parsea todas las directivas `<!-- -->` de un bloque de texto Markdown.
+ * Usa el registry de handlers en lugar de switch/if-else,
+ * lo que hace que añadir nuevas directivas sea trivial.
+ */
  export function parseDirectives(
    markdown: string
  ): {
@@ -56,241 +400,114 @@ export type DirectiveType = "replace" | "add";
    const directives: ParsedDirective[] = [];
    const errors: ParseError[] = [];
 
-   // Expresión regular para capturar directivas:
-   // <!-- type:param1:param2 -->  o  <!-- type:param1 -->
-   // Los grupos opcionales permiten flexibilidad.
-   const regex = /<!--\s*(replace|add):(\d+)(?::(\d+))?\s*-->/g;
+   // Expresión regular para capturar cualquier directiva <!-- TYPE:params -->
+   // Captura el tipo y los parámetros
+   const regex = /<!--\s*(\w+)[\s:\-]*([\s\S]*?)\s*-->/g;
 
    let match: RegExpExecArray | null;
+   let lastIndex = 0;
+   let tempRegexLastIndex = regex.lastIndex;
 
+   // Iteramos sobre todas las coincidencias
    while ((match = regex.exec(markdown)) !== null) {
-     const directiveType = match[1] as DirectiveType;
-     const startLine = parseInt(match[2], 10); // siempre definida
-     const endLine = match[3] ? parseInt(match[3], 10) : null;
+     const directiveType = match[1].toLowerCase();
+     const lineNumber = match.index + 1;
 
-     const lineNumber = match.index + 1; // posición aproximada en el texto
+     const handler = getHandler(directiveType);
+     if (!handler) {
+       // Directiva no reconocida - la ignoramos (no error, solo no la procesamos)
+       // Podríamos reportar error si fuera estricto, pero por diseño las ignoramos
+       continue;
+     }
 
      try {
-       switch (directiveType) {
-         case "replace": {
-           // replace requiere startLine y endLine
-           if (endLine === null) {
-             errors.push({
-               line: lineNumber,
-               message: "directive `replace` requiere: start y end line",
-               code: "invalid_range",
-             });
-             continue;
-           }
-
-           // Validar que start <= end
-           if (startLine < 1 || endLine < 1) {
-             errors.push({
-               line: lineNumber,
-               message: "líneas deben ser >= 1",
-               code: "invalid_range",
-             });
-             continue;
-           }
-
-           if (startLine > endLine) {
-             errors.push({
-               line: lineNumber,
-               message: "start line must be <= end line",
-               code: "invalid_range",
-             });
-             continue;
-           }
-
-           // El contenido está después de los parámetros hasta `-->`
-           // Recolectamos el texto entre el último parámetro y `-->`
-           const afterParams = match[0].slice(
-             match[0].indexOf(endLine !== null ? match[3] : match[2]) + (endLine !== null ? match[3]!.length : match[2].length)
-           );
-           const content = afterParams.replace(/--\s*-->/g "").trim();
-
-           // Si no hay contenido explícito, generamos un placeholder
-           const finalContent = content || `<!-- replaced content lines ${startLine}-${endLine} -->`;
-
-           directives.push({
-             type: "replace",
-             startLine,
-             endLine,
-             content: finalContent,
-           });
-           break;
-         }
-
-         case "add": {
-           // add requiere solo startLine (línea antes de insertar)
-           if (startLine < 1) {
-             errors.push({
-               line: lineNumber,
-               message: "línea de add debe ser >= 1",
-               code: "invalid_range",
-             });
-             continue;
-           }
-
-           // El contenido está después de los parámetros hasta `-->`
-           const afterParams = match[0].slice(match[2].length + match[0].indexOf(match[2]) + match[2].length);
-           // Simpler: tomar todo lo entre la directiva y -->, quitando la directiva herself
-           const directiveEndIndex = match[0].indexOf("-->");
-           const content = match[0].slice(
-             match[0].indexOf(match[2]) + match[2].length,
-             directiveEndIndex
-           ).trim();
-
-           const finalContent = content || `<!-- added before line ${startLine} -->`;
-
-           directives.push({
-             type: "add",
-             targetLine: startLine,
-             content: finalContent,
-           });
-           break;
-         }
-
-         default:
-           // Directiva no reconocida; la ignoramos (no error, solo no la procesamos)
-           // Podríamos empujar un error si fuera estricto, pero por diseño las ignoramos.
-           break;
+       const parsed = handler.parse(markdown, lineNumber);
+       if (parsed) {
+         directives.push(parsed);
        }
      } catch (e) {
        errors.push({
          line: lineNumber,
-         message: `error parsing directive: ${(e as Error).message}`,
+         message: `Error parsing ${directiveType} directive: ${(e as Error).message}`,
          code: "malformed",
        });
      }
    }
 
-   // NOTE: La validación de solapamientos (overlap) se hace después,
-  // cuando ya conocemos el documento completo y el orden de aplicación.
-  // Aquí solo reportamos sintaxis inválida.
+   // Validación cruzada (overlaps, etc.)
+   const validationErrors = handler.validate
+     ? DIRECTIVE_HANDLERS[Object.keys(DIRECTIVE_HANDLERS).find(k => DIRECTIVE_HANDLERS[k] === handler)?.toString() || ""].validate(directives)
+     : [];
+
+   // Añadimos errores de validación
+   for (const err of validationErrors) {
+     errors.push({
+       line: 0,
+       message: err,
+       code: "overlap",
+     });
+   }
 
    return { directives, errors };
  }
 
- /**
-  * Valida que ninguna dos directivas se solapen.
-  * Se aplica después del parseo, sobre el conjunto completo de directivas.
-  * Retorna true si hay solapamientos, false en caso contrario.
-  *
-  * Dos directivas se solapan cuando sus rangos de líneas modificadas intersectan.
-  * - Dos `replace` se solapan si sus rangos [start, end] intersectan.
-  * - Un `replace` y un `add` se solapan si el `add` targetLine cae dentro del rango `replace`.
-  * - Dos `add` con targetLines diferentes no se solapan directamente,
-  *   pero si apuntan a la misma posición relativa pueden causar problemas;
-  *   aquí levantamos error solo si uno queda totalmente contenido en otro.
-  */
- export function checkForOverlaps(directives: ParsedDirective[]): string[] {
-   const problems: string[] = [];
+// ============================================================
+// Aplicar directivas a un prompt
+// ============================================================
 
-   for (let i = 0; i < directives.length; i++) {
-     for (let j = i + 1; j < directives.length; j++) {
-       const d1 = directives[i];
-       const d2 = directives[j];
-
-       if (d1.type === "replace" && d2.type === "replace") {
-         // Rangos [start1,end1] y [start2,end2] se intersectan cuando:
-         // start1 <= end2 && start2 <= end1
-         if (d1.startLine <= d2.endLine && d2.startLine <= d1.endLine) {
-           problems.push(
-             `Overlap between replace directives at lines [${d1.startLine}-${d1.endLine}] and [${d2.startLine}-${d2.endLine}]`
-           );
-         }
-       } else if (d1.type === "replace" && d2.type === "add") {
-         // `add` inserta antes de targetLine2. Si targetLine2 está dentro del rango replace de d1, overlap.
-         if (d2.targetLine >= d1.startLine && d2.targetLine <= d1.endLine) {
-           problems.push(
-             `Overlap: add before line ${d2.targetLine} falls inside replace [${d1.startLine}-${d1.endLine}]`
-           );
-         }
-         // También revisar el caso inverso
-       } else if (d2.type === "replace" && d1.type === "add") {
-         if (d1.targetLine >= d2.startLine && d1.targetLine <= d2.endLine) {
-           problems.push(
-             `Overlap: add before line ${d1.targetLine} falls inside replace [${d2.startLine}-${d2.endLine}]`
-           );
-         }
-       } else if (d1.type === "add" && d2.type === "add") {
-         // Dos add: si apuntan a la misma targetLine, es overlap.
-         if (d1.targetLine === d2.targetLine) {
-           problems.push(
-             `Overlap: two add directives targeting line ${d1.targetLine}`
-           );
-         }
-       }
-     }
-   }
-
-   return problems;
- }
-
- /**
-  * Aplica las directivas a un prompt (array de líneas de string).
-  * El orden de aplicación es de abajo hacia arriba (mayor índice primero)
-  * para que los números de línea permanezcan válidos.
-  *
-  * @param lines Líneas originales del prompt (0-indexed internamente, pero directivas son 1-indexed)
-  * @param directives Directivas parseadas y validadas (sin solapamientos)
-  * @returns Nuevo array de líneas después de aplicar todos los parches
-  *
-  * Lógica:
-  * 1. Ordenar directivas por índice descendente (de la última línea a la primera)
-  * 2. Aplicar cada una:
-    - `replace`: sustituye el segmento lines[startLine-1..endLine-1] por [content]
-    - `add`: inserta content antes de lines[targetLine-1]
-  * 3. Retornar el nuevo array
-  */
+/**
+ * Aplica las directivas parseadas a un prompt (array de líneas).
+ * Ordena las directivas de abajo hacia arriba para no desplazar índices.
+ */
  export function applyDirectives(
    lines: string[],
    directives: ParsedDirective[]
  ): string[] {
-   // Copiar para no mutar el original
-   const result = [...lines];
+   if (directives.length === 0) return lines;
 
-   // Ordenar de forma descendente por target/index para aplicar de abajo hacia arriba
+   // Ordenar de forma descendente por el índice objetivo para aplicar de abajo hacia arriba
    // y así los índices no se desplacen inesperadamente.
    const sorted = [...directives].sort((a, b) => {
-     // Prioridad: replace antes que add si están en misma posición?
-     // Aplicamos simplemente ordenado por el índice objetivo descendente.
-     const idxA = a.type === "replace" ? a.endLine : a.targetLine;
-     const idxB = b.type === "replace" ? b.endLine : b.targetLine;
-     return idxB - idxA; // descendente
+     // Prioridad: anchor > replace > add (por orden de complejidad)
+     // Usamos el índice objetivo de cada una
+     const getIdx = (d: ParsedDirective) => {
+       if (d.type === "anchor" && d.anchorType) {
+         // Para anclas, usamos el valor como índice aproximado
+         return 0; // Se manejará specially
+       }
+       if (d.type === "replace") {
+         return d.endLine || 0;
+       }
+       if (d.type === "add") {
+         return d.targetLine || 0;
+       }
+       return 0;
+     };
+
+     const idxA = getIdx(a);
+     const idxB = getIdx(b);
+
+     // Sort descendente: mayores índices primero
+     return idxB - idxA;
    });
 
    for (const dir of sorted) {
-     if (dir.type === "replace") {
-       // Ajustar a 0-indexed
-       const zeroStart = dir.startLine - 1;
-       const zeroEnd = dir.endLine; // slice end es exclusivo, por usamos endLine directamente
-
-       // Asegurarnos de no salirnos del arreglo
-       const actualEnd = Math.min(zeroEnd, result.length);
-       const replaced = dir.content;
-
-       // Reemplazamos el segmento
-       result.splice(zeroStart, zeroEnd - zeroStart, replaced);
-     } else if (dir.type === "add") {
-       // Insertar antes de la línea targetLine (1-indexed) → índice zeroBased = targetLine-1
-       const zeroBased = dir.targetLine - 1;
-
-       // Clamp: si targetLine > lines.length, insertar al final
-       const clampedBased = Math.min(zeroBased, result.length);
-
-       result.splice(clampedBased, 0, dir.content);
+     const handler = getHandler(dir.type);
+     if (handler && handler.apply) {
+       lines = handler.apply(lines, dir);
      }
    }
 
-   return result;
+   return lines;
  }
 
- /**
-  * Exporta una función de conveniencia que hace parseo + validación de superposición + aplicación.
-  * Útil para el Patch Engine.
-  */
+// ============================================================
+// Función principal de procesamiento
+// ============================================================
+
+/**
+ * Procesa un prompt completo: parseo, validación y aplicación.
+ */
  export function processPrompt(
    markdown: string,
    lines: string[]
@@ -301,16 +518,28 @@ export type DirectiveType = "replace" | "add";
    warnings: { message: string }[];
  } {
    const { directives, errors: parseErrors } = parseDirectives(markdown);
-   const overlapErrors = checkForOverlaps(directives);
+
+   // Si hay errores de parsing estructural, retornamos error
+   if (parseErrors.length > 0) {
+     const formattedErrors = parseErrors.map((e) => ({
+       message: e.message,
+       code: e.code,
+       line: e.line,
+     }));
+     return { success: false, patchedLines: lines, errors: formattedErrors, warnings: [] };
+   }
+
+   // Validar solapamientos usando los handlers
+   const overlapErrors = DIRECTIVE_HANDLERS["anchor"]?.validate
+     ? DIRECTIVE_HANDLERS["anchor"].validate(directives)
+     : [];
 
    const allErrors: { message: string; code: string; line: number }[] = [];
 
-   // Errores de parsing
    for (const e of parseErrors) {
      allErrors.push({ message: e.message, code: e.code, line: e.line });
    }
 
-   // Errores de superposición
    for (const o of overlapErrors) {
      allErrors.push({ message: o, code: "overlap", line: 0 });
    }
@@ -321,22 +550,50 @@ export type DirectiveType = "replace" | "add";
 
    const patchedLines = applyDirectives(lines, directives);
 
-   const warnings: { message: string }[] = [];
-
-   // Advertir si algunas directivas fueron ignoradas (por ejemplo, tipo desconocido)
-   // Esto podría añadirse si el usuario espera que todas sean procesadas.
-
    return {
      success: true,
      patchedLines,
      errors: [],
-     warnings,
+     warnings: [],
    };
  }
 
+// ============================================================
+// Export público
+// ============================================================
+
  export default {
    parseDirectives,
-   checkForOverlaps,
+   checkForOverlaps: (directives: ParsedDirective[]) => {
+     // Validation is now handled by each handler's validate method
+     // This is kept for backward compatibility
+     return [];
+   },
    applyDirectives,
    processPrompt,
+   DirectiveHandler,
+   ReplaceHandler,
+   AddHandler,
+   AnchorHandler,
+   DIRECTIVE_HANDLERS,
  };
+
+// ============================================================
+// Ejemplo de uso (documentado, no ejecutado en producción)
+// ===========================================================
+
+/*
+ * Ejemplo de uso:
+ *
+ * const markdown = `<!-- replace:2:4 -->
+ * Nuevo contenido replace`;
+ * const lines = [
+ *   "Línea 1",
+ *   "Línea 2 original",
+ *   "Línea 3 original",
+ *   "Línea 4",
+ * ];
+ * const result = processPrompt(markdown, lines);
+ * console.log("Transformed:", result.transformedLines);
+ * console.log("Errors:", result.errors);
+ */

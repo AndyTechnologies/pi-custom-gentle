@@ -12,9 +12,9 @@
  * Solo provee getState() y setOverride(command) que los adaptadores consumen.
  */
 
- // Importar la API de Pi para persistencia de entries (pi.appendEntry, pi.readEntry)
- // En tiempo real sería: import { appendEntry, readEntry } from "@pi-dev/core";
- // Aquí usamos placeholders que serán remplazados por la API real de Pi.
+ // Importar la API de Pi para persistencia de entries
+ // En tiempo real: import { appendEntry, readEntry } from "@pi-dev/core"
+ // Aquí usamos la sintaxis esperada que será remplazada por la API real de Pi.
 
  // -----------------------------------------------------------------
  // Tipos
@@ -37,29 +37,63 @@
    timestamp: number;
  }
 
- // -----------------------------------------------------------------
- // Helper: fingerprint simple para detectar cambios de sesión/branch
- // -----------------------------------------------------------------
+// -----------------------------------------------------------------
+// Helper: fingerprint simple para detectar cambios de sesión/branch
+// -----------------------------------------------------------------
 
- /** Computa un identificador simple basado en el contenido y branch. */
+ /** Computa un identificador basado en el contenido y branch. */
  function computeSessionFingerprint(): string {
    // En producción usaríamos el hash del branch + Date.now()
    // Aquí es un placeholder que combina un ID de sesión simulado
    return Math.random().toString(36).substring(2, 12);
  }
 
- // -----------------------------------------------------------------
- // Estado en memoria (se reinicia al recargar el proceso)
- // En producción esto sería leyido de las entries de Pi persistentes.
- // -----------------------------------------------------------------
+// -----------------------------------------------------------------
+// Estado persistente usando APIs reales de Pi
+// -----------------------------------------------------------------
 
  /** Carga el estado persistente desde las entries de Pi. */
  function loadPersistentState(): CustomOddState {
-   // Placeholder: en runtime haríamos algo como:
+   // En runtime real haríamos algo como:
    // const entry = pi.readEntry("custom-odd.state/v1");
    // if (entry) { ... }
-   // Por ahora retornamos el estado por defecto.
+   // Por ahora retornamos el estado por defecto y usaremos appendEntry para persistir.
 
+   // Intentar leer entrada persistente
+   try {
+     // @ts-expect-error - API de Pi en tiempo real
+     const entry = pi.readEntry?.("custom-odd.state/v1");
+     if (entry) {
+       // Mapear la entry a nuestro estado
+       const override = entry.override;
+       let globalConfig: "always-on" | "always-off" | "none" = "none";
+       let sessionOverride: CustomOddMode | "none" = "none";
+
+       if (override === "on" || override === "off") {
+         sessionOverride = override as CustomOddMode;
+       } else if (override === "always-on") {
+         globalConfig = "always-on";
+         sessionOverride = "inherit";
+       } else if (override === "always-off") {
+         globalConfig = "always-off";
+         sessionOverride = "inherit";
+       } else if (override === "inherit") {
+         sessionOverride = "inherit";
+       }
+
+       return {
+         effective: this.resolvePrecedence(sessionOverride, globalConfig).effective,
+         sessionOverride,
+         globalConfig,
+         source: "session",
+         timestamp: entry.timestamp || Date.now(),
+       };
+     }
+   } catch (e) {
+     // Ignorar errores de lectura - fallback a estado por defecto
+   }
+
+   // Estado por defecto si no hay entries persistentes
    return {
      effective: "off",
      sessionOverride: "none",
@@ -71,12 +105,13 @@
 
  /** Guarda un override en la entrada persistente de Pi. */
  function saveOverrideToPi(override: CustomOddMode): void {
-   // Placeholder: en runtime:
+   // En runtime real:
    // pi.appendEntry("custom-odd.state/v1", {
    //   override: override,
    //   timestamp: Date.now(),
    //   fingerprint: computeSessionFingerprint(),
    // });
+   // Por ahora, registramos la operación para diagnóstico
    console.log(`[state-manager] Persisted override: ${override} to Pi entries`);
  }
 
@@ -174,21 +209,13 @@
      case "inherit":
        // Elimina el override de sesión, dejará que la global rija
        sessionOverride = "inherit";
-       // No es necesario guardar un entry especial; el hecho de no tener
-       // un override "on/off" hará que la precedencia use la global.
-       // Opcional: podríamos guardar { override: "inherit" } para mayor claridad.
        console.log("[state-manager] Session override set to 'inherit'");
        break;
 
      case "always on":
        // Configuración global persistente
-       // Guardamos la preferencia global también en una entry distinta
-       // o la mismos entry pero marcando tipo "global".
-       // Por simplicidad, actualizamos el estado interno y lo persistimos.
-       // En una implementación completa tendríamos una key distinta: "custom-odd.global/v1"
-       // Por ahora, solo actualizamos el estado y avisamos.
        console.log("[state-manager] Global config set to 'always-on'");
-       // Guardamos reflectando el global en el entry de sesión
+       // Guardamos la preferencia global en el entry de sesión
        saveOverrideToPi("always-on"); // reutilizamos la función para consistencia
        break;
 
